@@ -17,7 +17,7 @@ p.sub{margin:0 0 18px;color:var(--mut)}
 .grid{display:grid;grid-template-columns:1.1fr 1fr;gap:18px}
 @media(max-width:760px){.grid{grid-template-columns:1fr}}
 .stage{background:var(--card);border:2px solid var(--line);border-radius:28px;padding:10px;display:flex;justify-content:center}
-canvas{width:100%;max-width:480px;height:auto;aspect-ratio:1}
+canvas{width:100%;max-width:480px;height:auto;aspect-ratio:1;border-radius:20px}
 .panel{background:var(--card);border:2px solid var(--line);border-radius:20px;padding:16px;margin-bottom:14px}
 .panel h2{font-size:1rem;margin:0 0 10px}
 .row{display:flex;flex-wrap:wrap;gap:8px}
@@ -27,6 +27,8 @@ button[aria-pressed="true"]{background:var(--acc);border-color:var(--acc);color:
 button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid var(--acc);outline-offset:2px}
 .file input{display:none}
 audio{width:100%;margin-top:10px}
+video{width:100%;border-radius:14px;margin-top:10px;background:#000}
+button:disabled{opacity:.5;cursor:not-allowed}
 .read{display:grid;grid-template-columns:auto 1fr;gap:6px 12px;align-items:center;font-variant-numeric:tabular-nums}
 .bar{height:12px;background:var(--bg);border:2px solid var(--line);border-radius:99px;overflow:hidden}
 .bar i{display:block;height:100%;width:0;background:var(--acc)}
@@ -52,6 +54,12 @@ input[type=range]{flex:1;accent-color:var(--acc)}
         </div>
         <audio id="aud" controls hidden></audio>
         <p id="msg" role="status"></p>
+      </div>
+      <div class="panel"><h2>Record video</h2>
+        <div class="row"><button id="bRec" aria-pressed="false">Record</button><button id="bSave" disabled>Save video</button></div>
+        <label>Background <input id="bg" type="color" value="#ffe9b8"></label>
+        <p id="recMsg" role="status" style="color:var(--mut);margin:8px 0 0">Start a sound first, then press Record. Keep this tab in view while recording.</p>
+        <video id="vid" controls playsinline hidden></video>
       </div>
       <div class="panel"><h2>Tuning</h2>
         <label>Pitch range
@@ -154,16 +162,17 @@ function mouth(f){
   g.restore();
 }
 function draw(t){
-  const f=FACES[cur];g.clearRect(0,0,480,480);g.save();g.translate(240,258);
+  const f=FACES[cur];g.fillStyle=$('#bg').value;g.fillRect(0,0,480,480);g.save();g.translate(240,258);
   const sc=1+S.v*.05;g.scale(sc,sc);g.rotate(Math.sin(t/700)*.02+(S.p-.4)*.05);
   g.save();f.head();g.restore();g.save();eyes(f,t);g.restore();mouth(f);if(f.front){g.save();f.front();g.restore()}g.restore();
 }
 
 /* ---------- audio ---------- */
-let ac,an,buf,srcNode,osc,oscGain,micStream,fileNode,mode='';
+let ac,an,buf,recDest,srcNode,osc,oscGain,micStream,fileNode,mode='',mediaRec,chunks=[],recBlob,recExt='webm',vidUrl,recT0=0;
 const aud=$('#aud'),msg=$('#msg');
-function ctx(){if(!ac){ac=new (window.AudioContext||window.webkitAudioContext)();an=ac.createAnalyser();an.fftSize=2048;buf=new Float32Array(an.fftSize)}if(ac.state==='suspended')ac.resume()}
+function ctx(){if(!ac){ac=new (window.AudioContext||window.webkitAudioContext)();an=ac.createAnalyser();an.fftSize=2048;buf=new Float32Array(an.fftSize);recDest=ac.createMediaStreamDestination()}if(ac.state==='suspended')ac.resume()}
 function stopAll(){
+  stopRec();
   if(micStream){micStream.getTracks().forEach(t=>t.stop());micStream=null}
   if(srcNode){try{srcNode.disconnect()}catch(e){}srcNode=null}
   if(osc){try{osc.stop();osc.disconnect();oscGain.disconnect()}catch(e){}osc=null}
@@ -175,7 +184,7 @@ $('#bStop').onclick=()=>{stopAll();msg.textContent='Stopped.'};
 $('#bMic').onclick=async()=>{
   stopAll();ctx();
   try{micStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false}});
-   srcNode=ac.createMediaStreamSource(micStream);srcNode.connect(an);mode='mic';
+   srcNode=ac.createMediaStreamSource(micStream);srcNode.connect(an);srcNode.connect(recDest);mode='mic';
    $('#bMic').setAttribute('aria-pressed','true');aud.hidden=true;msg.textContent='Listening. Hum, sing or talk.'}
   catch(e){msg.textContent='Microphone is blocked or missing. Allow access in your browser, or use Upload audio or Demo sweep.'}
 };
@@ -183,17 +192,43 @@ $('#file').onchange=e=>{
   const fl=e.target.files[0];if(!fl)return;stopAll();ctx();
   aud.src=URL.createObjectURL(fl);aud.hidden=false;
   if(!fileNode)fileNode=ac.createMediaElementSource(aud);
-  fileNode.connect(an);fileNode.connect(ac.destination);mode='file';
+  fileNode.connect(an);fileNode.connect(ac.destination);fileNode.connect(recDest);mode='file';
   aud.play().catch(()=>{});msg.textContent='Playing '+fl.name;
 };
 $('#bDemo').onclick=()=>{
   stopAll();ctx();osc=ac.createOscillator();oscGain=ac.createGain();osc.type='triangle';oscGain.gain.value=.12;
-  osc.connect(oscGain);oscGain.connect(an);oscGain.connect(ac.destination);osc.start();mode='demo';
+  osc.connect(oscGain);oscGain.connect(an);oscGain.connect(ac.destination);oscGain.connect(recDest);osc.start();mode='demo';
   $('#bDemo').setAttribute('aria-pressed','true');aud.hidden=true;msg.textContent='A tone sweeps from low to high.';
 };
 $('#range').onchange=e=>{S.range=e.target.value.split(',').map(Number)};
 $('#sens').oninput=e=>{S.sens=+e.target.value};
 
+const bRec=$('#bRec'),bSave=$('#bSave'),vid=$('#vid'),recMsg=$('#recMsg');
+function pickMime(){return['video/mp4;codecs=avc1.42E01E,mp4a.40.2','video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm'].find(m=>window.MediaRecorder&&MediaRecorder.isTypeSupported(m))||''}
+function startRec(){
+  if(!window.MediaRecorder||!cv.captureStream){recMsg.textContent='This browser cannot record video. Try a recent Chrome, Edge, Firefox or Safari.';return}
+  if(!mode){recMsg.textContent='Pick an audio source first, then press Record.';return}
+  const mime=pickMime();recExt=mime.startsWith('video/mp4')?'mp4':'webm';
+  const stream=cv.captureStream(30);recDest.stream.getAudioTracks().forEach(t=>stream.addTrack(t));
+  chunks=[];
+  try{mediaRec=new MediaRecorder(stream,mime?{mimeType:mime,videoBitsPerSecond:4e6}:{videoBitsPerSecond:4e6})}catch(e){recMsg.textContent='Recording could not start: '+e.message;return}
+  mediaRec.ondataavailable=e=>{if(e.data.size)chunks.push(e.data)};
+  mediaRec.onstop=()=>{recBlob=new Blob(chunks,{type:mediaRec.mimeType||'video/webm'});if(vidUrl)URL.revokeObjectURL(vidUrl);vidUrl=URL.createObjectURL(recBlob);vid.src=vidUrl;vid.hidden=false;bSave.disabled=false;bRec.setAttribute('aria-pressed','false');bRec.textContent='Record';recMsg.textContent='Recorded '+((performance.now()-recT0)/1000).toFixed(1)+' s. Check the preview, then save.'};
+  if(mode==='file'){aud.currentTime=0;aud.play().catch(()=>{})}
+  recT0=performance.now();mediaRec.start(250);
+  bRec.setAttribute('aria-pressed','true');bRec.textContent='Stop recording';bSave.disabled=true;recMsg.textContent='Recording…';
+}
+function stopRec(){if(mediaRec&&mediaRec.state!=='inactive')mediaRec.stop()}
+bRec.onclick=()=>mediaRec&&mediaRec.state==='recording'?stopRec():startRec();
+aud.onended=()=>stopRec();
+bSave.onclick=async()=>{
+  if(!recBlob)return;const name='pitch-face.'+recExt;
+  try{
+    const dl=window.claude?await claude.use('downloads'):null;
+    if(dl){await dl.save({filename:name,data:recBlob});recMsg.textContent='Saved '+name}
+    else{const a=document.createElement('a');a.href=vidUrl;a.download=name;a.click();recMsg.textContent='Downloading '+name}
+  }catch(e){if(e&&e.code==='declined')return;recMsg.textContent='Could not save: '+((e&&e.message)||'unknown error')+'. You can also save from the preview menu.'}
+};
 function detect(sr){
   an.getFloatTimeDomainData(buf);const n=buf.length;let r=0;for(let i=0;i<n;i++)r+=buf[i]*buf[i];r=Math.sqrt(r/n);
   if(r<.008)return{f:-1,r};
